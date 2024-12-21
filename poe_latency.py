@@ -14,7 +14,16 @@ class LatencyChecker:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("Path of Exile Server Latency Checker")
+        
+        # Set minimum window size
+        self.root.minsize(800, 600)
+        
+        # Set default window size
         self.root.geometry("1200x800")
+        
+        # Configure window scaling
+        self.root.grid_rowconfigure(0, weight=1)
+        self.root.grid_columnconfigure(0, weight=1)
         
         # Get optimal thread count (leaving one core free for UI)
         self.thread_count = max(1, multiprocessing.cpu_count() - 1)
@@ -75,23 +84,26 @@ class LatencyChecker:
         columns = ('location', 'host', 'min', 'avg', 'max', 'loss', 'last_check')
         self.tree = ttk.Treeview(self.main_frame, columns=columns, show='headings')
         
-        # Configure headers
-        self.tree.heading('location', text='Location')
-        self.tree.heading('host', text='Host')
-        self.tree.heading('min', text='Min (ms)')
-        self.tree.heading('avg', text='Avg (ms)')
-        self.tree.heading('max', text='Max (ms)')
-        self.tree.heading('loss', text='Packet Loss')
-        self.tree.heading('last_check', text='Last Check')
+        # Initialize sort direction dictionary
+        self.sort_direction = {col: True for col in columns}  # True for ascending
         
-        # Configure column widths
-        self.tree.column('location', width=180)  # Wider for combined location info
-        self.tree.column('host', width=250)
-        self.tree.column('min', width=80)
-        self.tree.column('avg', width=80)
-        self.tree.column('max', width=80)
-        self.tree.column('loss', width=100)
-        self.tree.column('last_check', width=150)
+        # Configure headers with sorting
+        self.tree.heading('location', text='Location', command=lambda: self.sort_column('location'))
+        self.tree.heading('host', text='Host', command=lambda: self.sort_column('host'))
+        self.tree.heading('min', text='Min (ms)', command=lambda: self.sort_column('min'))
+        self.tree.heading('avg', text='Avg (ms)', command=lambda: self.sort_column('avg'))
+        self.tree.heading('max', text='Max (ms)', command=lambda: self.sort_column('max'))
+        self.tree.heading('loss', text='Packet Loss', command=lambda: self.sort_column('loss'))
+        self.tree.heading('last_check', text='Last Check', command=lambda: self.sort_column('last_check'))
+        
+        # Configure column widths and behavior
+        self.tree.column('location', width=180, minwidth=120, stretch=True)  # Expandable
+        self.tree.column('host', width=250, minwidth=180, stretch=True)     # Expandable
+        self.tree.column('min', width=80, minwidth=60, stretch=False)       # Fixed
+        self.tree.column('avg', width=80, minwidth=60, stretch=False)       # Fixed
+        self.tree.column('max', width=80, minwidth=60, stretch=False)       # Fixed
+        self.tree.column('loss', width=100, minwidth=80, stretch=False)     # Fixed
+        self.tree.column('last_check', width=150, minwidth=120, stretch=True)  # Expandable
         
         # Add scrollbar
         scrollbar = ttk.Scrollbar(self.main_frame, orient=tk.VERTICAL, command=self.tree.yview)
@@ -110,19 +122,37 @@ class LatencyChecker:
             ))
 
     def create_log_box(self):
-        log_frame = ttk.LabelFrame(self.main_frame, text="Log", padding="5")
-        log_frame.grid(row=2, column=0, columnspan=5, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
+        # Create log frame with better padding
+        log_frame = ttk.LabelFrame(self.main_frame, text="Log", padding="8")
+        log_frame.grid(row=2, column=0, columnspan=5, sticky=(tk.W, tk.E, tk.N, tk.S), pady=8)
         
-        self.log_text = tk.Text(log_frame, height=10, wrap=tk.WORD)
-        log_scrollbar = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self.log_text.yview)
-        self.log_text.configure(yscrollcommand=log_scrollbar.set)
+        # Create horizontal scrollbar
+        h_scrollbar = ttk.Scrollbar(log_frame, orient=tk.HORIZONTAL)
+        v_scrollbar = ttk.Scrollbar(log_frame, orient=tk.VERTICAL)
         
+        # Configure text widget with both scrollbars and word wrap
+        self.log_text = tk.Text(
+            log_frame,
+            height=8,  # Minimum height in lines
+            wrap=tk.NONE,  # Allow horizontal scrolling
+            xscrollcommand=h_scrollbar.set,
+            yscrollcommand=v_scrollbar.set
+        )
+        
+        # Configure scrollbar commands
+        h_scrollbar.configure(command=self.log_text.xview)
+        v_scrollbar.configure(command=self.log_text.yview)
+        
+        # Grid layout with proper weights and sticky
         self.log_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        log_scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        v_scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        h_scrollbar.grid(row=1, column=0, sticky=(tk.W, tk.E))
         
+        # Configure grid weights for proper resizing
         log_frame.grid_columnconfigure(0, weight=1)
         log_frame.grid_rowconfigure(0, weight=1)
         
+        # Set initial state
         self.log_text.configure(state=tk.DISABLED)
 
     def process_log_queue(self):
@@ -217,9 +247,14 @@ class LatencyChecker:
         """Update server status in the table (thread-safe)"""
         for item in self.tree.get_children():
             if self.tree.set(item, 'location') == location:
-                self.tree.set(item, 'min', results['min'])
-                self.tree.set(item, 'avg', results['avg'])
-                self.tree.set(item, 'max', results['max'])
+                # Format latency values as integers
+                min_val = round(results['min']) if isinstance(results['min'], (int, float)) else results['min']
+                avg_val = round(results['avg']) if isinstance(results['avg'], (int, float)) else results['avg']
+                max_val = round(results['max']) if isinstance(results['max'], (int, float)) else results['max']
+                
+                self.tree.set(item, 'min', min_val)
+                self.tree.set(item, 'avg', avg_val)
+                self.tree.set(item, 'max', max_val)
                 self.tree.set(item, 'loss', results['loss'])
                 self.tree.set(item, 'last_check', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
                 break
@@ -277,6 +312,39 @@ class LatencyChecker:
         else:
             self.check_button.configure(state=tk.NORMAL)
             self.stop_button.configure(state=tk.DISABLED)
+
+    def sort_column(self, column):
+        """Sort tree contents when a column header is clicked."""
+        # Get all items
+        items = [(self.tree.set(item, column), item) for item in self.tree.get_children('')]
+        
+        # Determine sort order
+        reverse = not self.sort_direction[column]
+        self.sort_direction[column] = reverse
+        
+        def convert_value(value):
+            """Convert string values to appropriate types for sorting"""
+            if value == '-':
+                return float('-inf')
+            # Handle already numeric values
+            if isinstance(value, (int, float)):
+                return float(value)
+            # Handle string values
+            if isinstance(value, str):
+                # Remove 'ms' and '%' suffixes and try to convert to float
+                try:
+                    return float(value.rstrip('ms%'))
+                except ValueError:
+                    # If conversion fails, return original string for lexicographical sorting
+                    return value
+            return value
+        
+        # Sort items
+        items.sort(key=lambda x: convert_value(x[0]), reverse=reverse)
+        
+        # Rearrange items in sorted order
+        for index, (_, item) in enumerate(items):
+            self.tree.move(item, '', index)
 
     def run(self):
         self.root.mainloop()
