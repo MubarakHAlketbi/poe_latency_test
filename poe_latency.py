@@ -81,7 +81,7 @@ class LatencyChecker:
         self.process_log_queue()
 
     def create_table(self):
-        columns = ('location', 'host', 'min', 'avg', 'max', 'loss', 'last_check')
+        columns = ('location', 'host', 'progress', 'min', 'avg', 'max', 'loss', 'last_check')
         self.tree = ttk.Treeview(self.main_frame, columns=columns, show='headings')
         
         # Initialize sort direction dictionary
@@ -90,6 +90,7 @@ class LatencyChecker:
         # Configure headers with sorting
         self.tree.heading('location', text='Location', command=lambda: self.sort_column('location'))
         self.tree.heading('host', text='Host', command=lambda: self.sort_column('host'))
+        self.tree.heading('progress', text='Progress', command=lambda: self.sort_column('progress'))
         self.tree.heading('min', text='Min (ms)', command=lambda: self.sort_column('min'))
         self.tree.heading('avg', text='Avg (ms)', command=lambda: self.sort_column('avg'))
         self.tree.heading('max', text='Max (ms)', command=lambda: self.sort_column('max'))
@@ -99,6 +100,7 @@ class LatencyChecker:
         # Configure column widths and behavior
         self.tree.column('location', width=180, minwidth=120, stretch=True)  # Expandable
         self.tree.column('host', width=250, minwidth=180, stretch=True)     # Expandable
+        self.tree.column('progress', width=80, minwidth=80, stretch=False)  # Fixed
         self.tree.column('min', width=80, minwidth=60, stretch=False)       # Fixed
         self.tree.column('avg', width=80, minwidth=60, stretch=False)       # Fixed
         self.tree.column('max', width=80, minwidth=60, stretch=False)       # Fixed
@@ -118,6 +120,7 @@ class LatencyChecker:
             self.tree.insert('', tk.END, values=(
                 server['location'],
                 server['host'],
+                '-',  # progress
                 '-', '-', '-', '-', 'Not checked'
             ))
 
@@ -183,15 +186,44 @@ class LatencyChecker:
         control_frame = ttk.Frame(self.main_frame, padding="5")
         control_frame.grid(row=1, column=0, columnspan=4, sticky=(tk.W, tk.E))
         
+        # Create ping count spinbox
+        ping_frame = ttk.Frame(control_frame)
+        ping_frame.grid(row=0, column=0, padx=5)
+        
+        ping_label = ttk.Label(ping_frame, text="Pings:")
+        ping_label.pack(side=tk.LEFT, padx=(0, 5))
+        
+        self.ping_count = tk.StringVar(value="8")  # Default 8 pings
+        self.ping_spinbox = ttk.Spinbox(
+            ping_frame,
+            from_=4,
+            to=50,
+            width=3,
+            textvariable=self.ping_count,
+            validate="key",
+            validatecommand=(self.root.register(self.validate_ping_count), '%P')
+        )
+        self.ping_spinbox.pack(side=tk.LEFT)
+        
         self.check_button = ttk.Button(control_frame, text="Check All", command=self.start_checking)
-        self.check_button.grid(row=0, column=0, padx=5)
+        self.check_button.grid(row=0, column=1, padx=5)
         
         self.stop_button = ttk.Button(control_frame, text="Stop", command=self.stop_checking, state=tk.DISABLED)
-        self.stop_button.grid(row=0, column=1, padx=5)
+        self.stop_button.grid(row=0, column=2, padx=5)
         
         # Add thread count label
         thread_label = ttk.Label(control_frame, text=f"Using {self.thread_count} threads")
-        thread_label.grid(row=0, column=2, padx=5)
+        thread_label.grid(row=0, column=3, padx=5)
+
+    def validate_ping_count(self, value):
+        """Validate the ping count input (4-50)"""
+        if value == "":
+            return True
+        try:
+            count = int(value)
+            return 4 <= count <= 50
+        except ValueError:
+            return False
 
     def ping_server(self, server_data):
         """Ping a server and return results (thread-safe)"""
@@ -199,44 +231,84 @@ class LatencyChecker:
         location = server_data['location']
         
         try:
-            self.log_message(f"Starting ping test for {location} ({host})")
+            ping_count = int(self.ping_count.get())
+            self.log_message(f"Starting ping test for {location} ({host}) with {ping_count} pings")
             
-            if platform.system().lower() == "windows":
-                cmd = ["ping", "-n", "8", host]
-            else:
-                cmd = ["ping", "-c", "8", host]
+            times = []
+            current_ping = 0
             
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            # Initialize progress
+            self.root.after(0, self.update_server_status, location, {
+                'min': '-', 'avg': '-', 'max': '-', 'loss': '-',
+                'progress': f"0/{ping_count}"
+            })
             
-            if platform.system().lower() == "windows":
-                times = re.findall(r"time[=<](\d+)ms", result.stdout)
-                times = [int(t) for t in times]
-                loss_match = re.search(r"\((\d+)% loss\)", result.stdout)
-                loss_percentage = loss_match.group(1) if loss_match else "100"
-            else:
-                times = re.findall(r"time=(\d+\.\d+)", result.stdout)
-                times = [float(t) for t in times]
-                loss_match = re.search(r"(\d+)% packet loss", result.stdout)
-                loss_percentage = loss_match.group(1) if loss_match else "100"
+            # Run individual pings
+            while current_ping < ping_count and not self.stop_flag:
+                if platform.system().lower() == "windows":
+                    cmd = ["ping", "-n", "1", host]
+                else:
+                    cmd = ["ping", "-c", "1", host]
+                
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                current_ping += 1
+                
+                # Extract time from single ping
+                if platform.system().lower() == "windows":
+                    time_match = re.search(r"time[=<](\d+)ms", result.stdout)
+                else:
+                    time_match = re.search(r"time=(\d+\.\d+)", result.stdout)
+                
+                if time_match:
+                    ping_time = float(time_match.group(1))
+                    times.append(ping_time)
+                    
+                    # Calculate current statistics
+                    current_stats = {
+                        'min': min(times),
+                        'avg': statistics.mean(times),
+                        'max': max(times),
+                        'loss': f"{((current_ping - len(times)) / current_ping * 100):.0f}%",
+                        'progress': f"{current_ping}/{ping_count}"
+                    }
+                    
+                    # Update UI with current progress
+                    self.root.after(0, self.update_server_status, location, current_stats)
+                else:
+                    # Update progress even for failed pings
+                    current_stats = {
+                        'min': min(times) if times else '-',
+                        'avg': statistics.mean(times) if times else '-',
+                        'max': max(times) if times else '-',
+                        'loss': f"{((current_ping - len(times)) / current_ping * 100):.0f}%",
+                        'progress': f"{current_ping}/{ping_count}"
+                    }
+                    self.root.after(0, self.update_server_status, location, current_stats)
             
+            # Final results
             if times:
                 result_data = {
                     'min': min(times),
                     'avg': statistics.mean(times),
                     'max': max(times),
-                    'loss': f"{loss_percentage}%"
+                    'loss': f"{((ping_count - len(times)) / ping_count * 100):.0f}%",
+                    'progress': f"{current_ping}/{ping_count}"
                 }
                 self.log_message(
                     f"Completed ping test for {location}: "
-                    f"min={result_data['min']}ms, "
+                    f"min={result_data['min']:.1f}ms, "
                     f"avg={result_data['avg']:.1f}ms, "
-                    f"max={result_data['max']}ms, "
+                    f"max={result_data['max']:.1f}ms, "
                     f"loss={result_data['loss']}"
                 )
                 return location, result_data
             else:
+                result_data = {
+                    'min': '-', 'avg': '-', 'max': '-', 'loss': '100%',
+                    'progress': f"{current_ping}/{ping_count}"
+                }
                 self.log_message(f"No response from {location} ({host})")
-                return location, {'min': '-', 'avg': '-', 'max': '-', 'loss': '100%'}
+                return location, result_data
                 
         except Exception as e:
             error_msg = f"Error pinging {location} ({host}): {str(e)}"
@@ -251,6 +323,10 @@ class LatencyChecker:
                 min_val = round(results['min']) if isinstance(results['min'], (int, float)) else results['min']
                 avg_val = round(results['avg']) if isinstance(results['avg'], (int, float)) else results['avg']
                 max_val = round(results['max']) if isinstance(results['max'], (int, float)) else results['max']
+                
+                # Update progress first
+                if 'progress' in results:
+                    self.tree.set(item, 'progress', results['progress'])
                 
                 self.tree.set(item, 'min', min_val)
                 self.tree.set(item, 'avg', avg_val)
